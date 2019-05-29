@@ -36,6 +36,12 @@ subject to the following restrictions:
 #include "LinearMath/btAlignedObjectArray.h"
 #include "BulletSoftBody/btSoftBody.h"
 
+#include <iostream>
+#include <vector>
+#include "../CommonInterfaces/CommonParameterInterface.h"
+#include "../ThirdPartyLibs/Wavefront/tiny_obj_loader.h"
+#include "../Utils/b3BulletDefaultFileIO.h"
+
 class btBroadphaseInterface;
 class btCollisionShape;
 class btOverlappingPairCache;
@@ -52,6 +58,26 @@ class btSoftRididCollisionAlgorithm;
 class btSoftRigidDynamicsWorld;
 
 #include "../CommonInterfaces/CommonRigidBodyBase.h"
+
+static btScalar kDP = 0;      // Damping coefficient [0,1]
+static btScalar kDG = 0;      // Drag coefficient [0,+inf]
+static btScalar kLF = 0;      // Lift coefficient [0,+inf]
+static btScalar kPR = 0;      // Pressure coefficient [-inf,+inf]
+static btScalar kVC = 0;      // Volume conversation coefficient [0,+inf]
+static btScalar kDF = 0;      // Dynamic friction coefficient [0,1]
+static btScalar kMT = 0;      // Pose matching coefficient [0,1]
+static btScalar kCHR = 0.5;   // Rigid contacts hardness [0,1]
+static btScalar kKHR = 0.5;   // Kinetic contacts hardness [0,1]
+static btScalar kSHR = 0.5;   // Soft contacts hardness [0,1]
+static btScalar kAHR = 0.5;   // Anchors hardness [0,1]
+static btScalar kSRHR_CL;     // Soft vs rigid hardness [0,1] (cluster only)
+static btScalar kSKHR_CL;     // Soft vs kinetic hardness [0,1] (cluster only)
+static btScalar kSSHR_CL;     // Soft vs soft hardness [0,1] (cluster only)
+static btScalar kSR_SPLT_CL;  // Soft vs rigid impulse split [0,1] (cluster only)
+static btScalar kSK_SPLT_CL;  // Soft vs rigid impulse split [0,1] (cluster only)
+static btScalar kSS_SPLT_CL;  // Soft vs rigid impulse split [0,1] (cluster only)
+static btScalar maxvolume;    // Maximum volume ratio for pose
+static btScalar timescale;    // Time scale
 
 class SoftDemo : public CommonRigidBodyBase
 {
@@ -209,6 +235,7 @@ MACRO_SOFT_DEMO(26)//Init_ClusterStackSoft
 MACRO_SOFT_DEMO(27)//Init_ClusterStackMixed
 MACRO_SOFT_DEMO(28)//Init_TetraCube
 MACRO_SOFT_DEMO(29)//Init_TetraBunny
+MACRO_SOFT_DEMO(30)//Init_ObjMattress
 
 #endif
 
@@ -1504,6 +1531,53 @@ static void Init_TetraCube(SoftDemo* pdemo)
 	pdemo->m_cutting = false;
 }
 
+static void Init_ObjMattress(SoftDemo* pdemo)
+{
+	std::vector<tinyobj::shape_t> shapes;
+	b3BulletDefaultFileIO fileIO;
+
+	std::string err = tinyobj::LoadObj(shapes, "C:\\Users\\Nikita.D\\Desktop\\mattress.obj", NULL, &fileIO);
+
+	if (!err.empty())
+	{
+		std::cerr << "Could not read Obj err: " << err << std::endl; 
+	}
+
+	auto softBodyMesh = shapes[0].mesh;
+
+	btSoftBody* psb = btSoftBodyHelpers::CreateFromTriMesh(pdemo->m_softBodyWorldInfo,
+														   &softBodyMesh.positions[0],
+														   (int*)&softBodyMesh.indices[0],
+														   softBodyMesh.indices.size() / 3);
+	psb->generateBendingConstraints(2);
+	pdemo->getSoftDynamicsWorld()->addSoftBody(psb);
+
+	psb->scale(btVector3(0.04, 0.04, 0.04));
+	psb->setPose(false, true);
+	//psb->setVolumeMass(300);
+
+	psb->m_cfg.kDP = kDP;
+	psb->m_cfg.kDG = kDG;
+	psb->m_cfg.kLF = kLF;
+	psb->m_cfg.kPR = kPR;
+	psb->m_cfg.kVC = kVC;
+	psb->m_cfg.kDF = kDF;
+	psb->m_cfg.kMT = kMT;
+	psb->m_cfg.kCHR = kCHR;
+	psb->m_cfg.kKHR = kKHR;
+	psb->m_cfg.kSHR = kSHR;
+	psb->m_cfg.kAHR = kAHR;
+	psb->m_cfg.kSRHR_CL;     // Soft vs rigid hardness [0,1] (cluster only)
+	psb->m_cfg.kSKHR_CL;     // Soft vs kinetic hardness [0,1] (cluster only)
+	psb->m_cfg.kSSHR_CL;     // Soft vs soft hardness [0,1] (cluster only)
+	psb->m_cfg.kSR_SPLT_CL;  // Soft vs rigid impulse split [0,1] (cluster only)
+	psb->m_cfg.kSK_SPLT_CL;  // Soft vs rigid impulse split [0,1] (cluster only)
+	psb->m_cfg.kSS_SPLT_CL;  // Soft vs rigid impulse split [0,1] (cluster only)
+	psb->m_cfg.maxvolume;    // Maximum volume ratio for pose
+	psb->m_cfg.timescale;    // Time scale
+
+}
+
 /* Init		*/
 void (*demofncs[])(SoftDemo*) =
 	{
@@ -1539,7 +1613,7 @@ void (*demofncs[])(SoftDemo*) =
 		Init_ClusterStackMixed,
 		Init_TetraCube,
 		Init_TetraBunny,
-};
+		Init_ObjMattress};
 
 #if 0
 void	SoftDemo::clientResetScene()
@@ -2027,8 +2101,89 @@ void	SoftDemo::mouseFunc(int button, int state, int x, int y)
 }
 #endif
 
+static btScalar kp = 100;
+static btScalar kd = 20;
+static btScalar maxForce = 100;
+
 void SoftDemo::initPhysics()
 {
+	{
+		SliderParams slider("Damping coefficient", &kDP);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Drag coefficient", &kDG);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1000;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Lift coefficient", &kLF);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1000;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Pressure coefficient ", &kPR);
+		slider.m_minVal = -1000;
+		slider.m_maxVal = 1000;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Volume conversation coefficien", &kVC);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1000;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Dynamic friction coefficient", &kDF);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Pose matching coefficient", &kMT);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Rigid contacts hardness", &kCHR);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Kinetic contacts hardness", &kKHR);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Soft contacts hardness", &kSHR);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
+	{
+		SliderParams slider("Anchors hardness", &kAHR);
+		slider.m_minVal = 0;
+		slider.m_maxVal = 1;
+		m_guiHelper->getParameterInterface()->registerSliderFloatParameter(slider);
+	}
+
 	///create concave ground mesh
 
 	m_guiHelper->setUpAxis(1);
